@@ -647,30 +647,22 @@ if ($pdo_oltp) {
         =====================================================
         */
 
-        $users = $pdo_oltp
-            ->query(
-                'SELECT *
-                 FROM dbo.usuarios
-                 ORDER BY id DESC'
-            )
-            ->fetchAll();
+        // Carga selectiva: las capas DW y BI no necesitan traer todas las filas OLTP.
+        if ($layer !== 4 && $layer !== 7) {
+            $users = $pdo_oltp
+                ->query('SELECT * FROM dbo.usuarios ORDER BY id DESC')
+                ->fetchAll(PDO::FETCH_ASSOC);
 
-        $acts = $pdo_oltp
-            ->query(
-                'SELECT i.*,u.nombre,u.apellidos
-                 FROM dbo.interacciones i
-                 JOIN dbo.usuarios u
-                 ON i.usuario_id=u.id
-                 ORDER BY i.id DESC'
-            )
-            ->fetchAll();
+            $acts = $pdo_oltp
+                ->query('SELECT i.*,u.nombre,u.apellidos FROM dbo.interacciones i JOIN dbo.usuarios u ON i.usuario_id=u.id ORDER BY i.id DESC')
+                ->fetchAll(PDO::FETCH_ASSOC);
 
-        $sessions = $pdo_oltp
-            ->query(
-                'SELECT *
-                 FROM dbo.sesiones'
-            )
-            ->fetchAll();
+            if ($layer === 5) {
+                $sessions = $pdo_oltp
+                    ->query('SELECT * FROM dbo.sesiones')
+                    ->fetchAll(PDO::FETCH_ASSOC);
+            }
+        }
 
         $total = count($users);
 
@@ -720,13 +712,14 @@ $title = [
 /* ============================================================
    DATA WAREHOUSE: METADATA REAL OLTP Y DW
    ============================================================ */
-function nexusInspectDatabase(?PDO $pdo): array {
+function nexusInspectDatabase(?PDO $pdo, array $onlyTables=[]): array {
     if (!$pdo) return ['connected'=>false,'tables'=>[],'total_rows'=>0,'error'=>'Sin conexión'];
     $tables=[]; $totalRows=0;
     try {
         $list=$pdo->query("SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE' ORDER BY TABLE_SCHEMA,TABLE_NAME")->fetchAll(PDO::FETCH_ASSOC);
         foreach($list as $item){
             $schema=(string)$item['TABLE_SCHEMA']; $name=(string)$item['TABLE_NAME'];
+            if ($onlyTables && !in_array($name, $onlyTables, true)) continue;
             $safeSchema=str_replace(']', ']]', $schema); $safeName=str_replace(']', ']]', $name);
             $full='['.$safeSchema.'].['.$safeName.']';
             $count=0; $countError=null;
@@ -744,8 +737,11 @@ function nexusInspectDatabase(?PDO $pdo): array {
         return ['connected'=>true,'tables'=>$tables,'total_rows'=>$totalRows,'error'=>null];
     } catch(Throwable $e){ return ['connected'=>true,'tables'=>[],'total_rows'=>0,'error'=>'No se pudo consultar la metadata']; }
 }
-$dw_oltp_info=nexusInspectDatabase($pdo_oltp);
-$dw_target_info=nexusInspectDatabase($pdo_dw);
+// Capa 4: mostrar únicamente dimensiones y hechos usados por el modelo analítico.
+$dw_used_tables = ['NX_DimDate','NX_DimDevice','NX_DimInteraction','NX_DimLocation','NX_DimUser','NX_FactInteraction','NX_FactSession'];
+$empty_db_info = ['connected'=>false,'tables'=>[],'total_rows'=>0,'error'=>null];
+$dw_oltp_info = ($layer === 4) ? nexusInspectDatabase($pdo_oltp) : $empty_db_info; // OLTP: todas sus tablas, como en la vista original.
+$dw_target_info = ($layer === 4) ? nexusInspectDatabase($pdo_dw, $dw_used_tables) : $empty_db_info;
 function nexusMaskDbValue(string $column, $value): string {
     if ($value === null) return 'NULL';
     $name = strtolower($column);
@@ -1415,11 +1411,16 @@ if ($validation) {
 <div class="notice">Para ejecutar el procesamiento real, configura la URL HTTPS y el token del servicio Colab en config/etl.php. Esta interfaz no simula resultados.</div>
 <?php elseif ($layer === 4): ?>
 <h2>Data Warehouse · Comparación OLTP y DW</h2>
-<p class="sub">Exploración de las bases reales conectadas a Azure SQL. Expande cualquier tabla para consultar su estructura de columnas.</p>
+<p class="sub">Exploración del Data Warehouse. Se muestran únicamente las dimensiones y tablas de hechos utilizadas por el modelo; expande una tabla para revisar sus columnas y registros.</p>
 <div class="dw-hero"><div class="dw-flow"><div class="dw-flow-node source"><span>01</span><b>NEXUS OLTP</b><small>Origen transaccional</small></div><div class="dw-flow-arrow"><i>Extract · Transform · Load</i><span>⟶</span></div><div class="dw-flow-node target"><span>02</span><b>NEXUS DW</b><small>Destino analítico</small></div></div></div>
+<section class="dw-diagram card">
+  <h3>Diagramas del modelo de datos</h3>
+  <p class="sub">Modelo relacional de interacciones y sesiones.</p>
+  <img src="assets/images/diagramas.png" alt="Diagrama del modelo relacional NEXUS: dimensiones, hechos de interacciones y sesiones" loading="lazy">
+</section>
 <div class="dwgrid dw-live-grid">
-  <?php nexusRenderDbPanel($dw_oltp_info,'NEXUS OLTP','Base de datos de origen','OLTP',$pdo_oltp); ?>
-  <?php nexusRenderDbPanel($dw_target_info,'NEXUS DW','Data Warehouse analítico','DW',$pdo_dw); ?>
+  <?php nexusRenderDbPanel($dw_oltp_info,'NEXUS OLTP','Base de datos transaccional de origen · todas las tablas','OLTP',$pdo_oltp); ?>
+  <?php nexusRenderDbPanel($dw_target_info,'NEXUS DW','Dimensiones y hechos utilizados en el modelo analítico','DW',$pdo_dw); ?>
 </div>
 <div class="notice dw-note"><b>Modelo dimensional Snowflake</b><br>El OLTP conserva la operación de la aplicación. El Data Warehouse organiza la información para análisis mediante dimensiones y tablas de hechos que se alimentan desde el proceso ETL.</div>
 <div class="toolbar"><button class="secondary" type="button" onclick="document.querySelectorAll('.dw-table').forEach(e=>e.open=true)">Expandir todas las tablas</button><button class="secondary" type="button" onclick="document.querySelectorAll('.dw-table').forEach(e=>e.open=false)">Contraer todas</button><a class="primary" href="?layer=5">Continuar a Predicciones →</a></div>
@@ -1572,8 +1573,8 @@ $topCategoryPercent30 = $recentInteractions30 ? round($topCategoryCount30 / $rec
     </div>
 
     <div class="card kpi">
-        <h3>Sesiones</h3>
-        <strong><?=count($sessions)?></strong>
+        <h3>Usuarios suspendidos</h3>
+        <strong><?=count(array_filter($users, fn($u) => in_array(strtolower(trim((string)($u['estado'] ?? ''))), ['suspendido','suspendida','suspended','suspension'], true)))?></strong>
     </div>
 
     <div class="card kpi">
@@ -1620,15 +1621,27 @@ $topCategoryPercent30 = $recentInteractions30 ? round($topCategoryCount30 / $rec
 
     <a
         class="primary"
-        href="https://app.powerbi.com/"
+        href="https://app.powerbi.com/groups/me/reports/c26fe833-1f41-4e56-aaa3-a2a5a93ba671/f0adf5d481993197158e?experience=power-bi"
         target="_blank"
     >
         Abrir Power BI ↗
     </a>
 
+<a
+      class="primary"
+      href="https://datastudio.google.com/reporting/c26fa154-8c20-4b1c-b480-9c4d0c2be385"
+      target="_blank"
+      rel="noopener noreferrer"
+      style="margin-left: 10px; background-color: #4B1E78;"
+    >
+      Abrir Looker Studio ↗
+    </a>
+
+
+
+
     <p class="small">
-        Configura la URL del informe publicado
-        para abrir tu dashboard.
+        Dashboard conectado en vivo a Azure SQL (DirectQuery).
     </p>
 
 </div>

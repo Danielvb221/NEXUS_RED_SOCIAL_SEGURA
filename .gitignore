@@ -1,0 +1,23 @@
+# Local secrets/configuration
+config/secrets.local.php
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+/tmp/
+/temp/
+
+# Notebook transient data
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
